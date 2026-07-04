@@ -1,0 +1,12 @@
+Place IEEE-CIS dataset files here.
+
+Download instructions:
+1. Accept rules: https://www.kaggle.com/competitions/ieee-fraud-detection/rules
+2. Run: kaggle competitions download -c ieee-fraud-detection -p data/ieee_cis
+3. Unzip: cd data/ieee_cis && unzip ieee-fraud-detection.zip
+
+Expected files:
+  train_transaction.csv  (~650 MB)
+  train_identity.csv     (~26 MB)
+  test_transaction.csv   (~585 MB)
+  test_identity.csv      (~25 MB)

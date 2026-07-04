@@ -1,0 +1,47 @@
+# docker-compose.ieee.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Override / extension for IEEE-CIS dataset support.
+#
+# Usage (merges with base docker-compose.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.ieee.yml up -d
+#
+# Or to train with IEEE-CIS:
+#   docker compose -f docker-compose.yml -f docker-compose.ieee.yml \
+#     --profile train run --rm trainer
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  api:
+    environment:
+      - MODEL_PATH=/app/models
+      - DATA_DIR=/app/data/ieee_cis
+      - FRAUD_THRESHOLD=0.5
+      - ACTIVE_DATASET=ieee_cis     # tells API which feature list to serve
+    volumes:
+      - ./data/ieee_cis:/app/data/ieee_cis:ro   # mount IEEE-CIS data read-only
+
+  dashboard:
+    environment:
+      - DATA_DIR=/app/data/ieee_cis
+      - API_URL=http://api:8000
+    volumes:
+      - ./data/ieee_cis:/app/data/ieee_cis:ro
+
+  trainer:
+    environment:
+      - DATA_DIR=/app/data/ieee_cis
+      - MODEL_PATH=/app/models
+      - DATASET=ieee_cis
+    volumes:
+      - ./data/ieee_cis:/app/data/ieee_cis:ro
+      - model_store:/app/models
+    command: >
+      bash -c "
+        echo 'Starting IEEE-CIS preprocessing...' &&
+        python preprocessing/ieee_preprocess.py &&
+        echo 'Starting IEEE-CIS training...' &&
+        python scripts/train_ieee.py
+      "

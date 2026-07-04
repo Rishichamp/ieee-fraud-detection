@@ -1,0 +1,44 @@
+# data (mounted as volume in production)
+data/
+*.csv
+
+# trained models (mounted as volume)
+models/*.pkl
+models/*.h5
+models/*.json
+
+# dev/test artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# notebooks & docs
+notebooks/
+*.ipynb
+*.md
+docs/
+
+# git
+.git/
+.gitignore
+
+# local envs
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# SSL certs (injected via secret in prod)
+nginx/ssl/

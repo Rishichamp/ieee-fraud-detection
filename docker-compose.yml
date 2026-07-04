@@ -1,0 +1,158 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Financial Fraud Detection System — Full Stack
+#
+#   Services:
+#     api        FastAPI inference endpoint  → :8000
+#     dashboard  Streamlit analytics UI      → :8501
+#     redis      Score cache + rate limiter  → :6379
+#     nginx      Reverse proxy / SSL term.   → :80 / :443
+#     training   One-shot model trainer      (profile: train)
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  fraud_net:
+    driver: bridge
+
+volumes:
+  model_store:   # shared trained model artifacts
+  redis_data:
+  nginx_logs:
+  app_logs:
+
+services:
+
+  # ── FastAPI inference service ───────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fraud_api
+    restart: unless-stopped
+    networks: [fraud_net]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models/ieee:/app/models/ieee
+      - model_store:/app/models
+      - app_logs:/app/logs
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_PATH=/app/models
+      - LOG_LEVEL=info
+      - FRAUD_THRESHOLD=0.5
+      - RATE_LIMIT_PER_MIN=120
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+
+  # ── Streamlit analytics dashboard ───────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fraud_dashboard
+    restart: unless-stopped
+    networks: [fraud_net]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./models/ieee:/app/models/ieee
+      - model_store:/app/models
+      - app_logs:/app/logs
+    environment:
+      - API_URL=http://api:8000
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+
+  # ── Redis cache ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: fraud_redis
+    restart: unless-stopped
+    networks: [fraud_net]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --save 60 1
+        --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Nginx reverse proxy ─────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: fraud_nginx
+    restart: unless-stopped
+    networks: [fraud_net]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - dashboard
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── One-shot model trainer (run with: docker compose --profile train up trainer) ─
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fraud_trainer
+    profiles: [train]
+    networks: [fraud_net]
+    volumes:
+      - ./models/ieee:/app/models/ieee
+      - model_store:/app/models
+      - ./data:/app/data
+      - app_logs:/app/logs
+    environment:
+      - MODEL_PATH=/app/models
+      - DATA_PATH=/app/data/creditcard.csv
+    command: ["python", "scripts/train_all.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+

@@ -1,0 +1,25 @@
+{
+  "dataset": "IEEE-CIS Fraud Detection",
+  "trained_at": "2026-06-15T05:45:36.329722Z",
+  "n_features": 448,
+  "train_samples": 472432,
+  "test_samples": 118108,
+  "fraud_rate": 0.03498916246147594,
+  "models": {
+    "xgboost": {
+      "auc": 0.9589,
+      "file": "xgboost_ieee.pkl"
+    },
+    "isolation_forest": {
+      "auc": 0.7689,
+      "file": "isolation_forest_ieee.pkl"
+    },
+    "autoencoder": {
+      "auc": null,
+      "file": "autoencoder_ieee.keras"
+    },
+    "ensemble": {
+      "auc": 0.9543
+    }
+  }
+}
