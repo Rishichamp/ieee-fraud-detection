@@ -1,17 +1,17 @@
 xgboost==2.0.3
-scikit-learn==1.4.2
-imbalanced-learn==0.12.3
+scikit-learn==1.9.0  # must match the version the models in models/ were saved with
+imbalanced-learn==0.14.2
 joblib==1.4.2
 numpy==1.26.4
 pandas==2.2.2
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-pydantic==2.7.1
+fastapi==0.143.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
 redis==5.0.4
-httpx==0.27.0
-streamlit==1.35.0
+httpx==0.28.1
+streamlit==1.65.0
 plotly==5.22.0
 shap==0.45.0
 networkx==3.3
-python-multipart==0.0.9
-requests==2.32.3
+python-multipart==0.0.32
+requests==2.34.2

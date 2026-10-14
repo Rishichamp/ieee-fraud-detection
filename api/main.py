@@ -238,7 +238,8 @@ async def predict_cc(txn: CCTransaction):
         scores = _score_cc(txn.features)
     except Exception as e:
         counters['errors'] += 1
-        raise HTTPException(500, str(e))
+        log.exception('Scoring failed')  # details stay in the server log
+        raise HTTPException(500, 'Scoring failed')
 
     is_fraud = scores['ensemble'] >= THRESHOLD
     if is_fraud:
@@ -271,7 +272,8 @@ async def predict_ieee(txn: IEEETransaction):
         scores = _score_ieee(txn.features)
     except Exception as e:
         counters['errors'] += 1
-        raise HTTPException(500, str(e))
+        log.exception('Scoring failed')  # details stay in the server log
+        raise HTTPException(500, 'Scoring failed')
 
     is_fraud = scores['ensemble'] >= THRESHOLD
     if is_fraud:
