@@ -162,8 +162,19 @@ curl http://localhost:8000/health
 ```bash
 curl -X POST http://localhost:8000/predict/ieee \
   -H "Content-Type: application/json" \
-  -d '{"transaction_id": "TXN-001", "features": [150.0, 86400.0, 4921.0, ...]}'
+  -d '{"transaction_id": "TXN-001", "features": [0.12, -0.53, 1.07, ...]}'
 ```
+Features go in the order of `GET /features/ieee`, standardised like the
+training data (`data/ieee_cis/processed`). To send raw encoded values instead,
+add `"prescaled": false`; the server then applies the training
+`StandardScaler`, which must exist at `SCALER_PATH`
+(default `data/ieee_cis/processed/scaler.pkl`, written by
+`preprocessing/ieee_preprocess.py`).
+
+`model_scores` only contains models that are actually loaded (the committed
+artifacts are XGBoost + Isolation Forest; the autoencoder joins when
+`models/ieee/autoencoder_ieee.keras` and TensorFlow are present). A dataset
+with no trained model returns `503` rather than a guessed score.
 
 ### Get feature list
 ```bash
@@ -176,6 +187,7 @@ curl -X POST http://localhost:8000/predict/batch \
   -H "Content-Type: application/json" \
   -d '{"transactions": [{"features": [...]}, {"features": [...]}]}'
 ```
+Up to 1000 transactions per request; returns a list of results.
 
 ### Response format
 ```json

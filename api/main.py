@@ -16,12 +16,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'info').upper())
 log = logging.getLogger('fraud_api')
 
 MODEL_PATH = Path(os.getenv('MODEL_PATH', 'models'))
+# StandardScaler fitted by preprocessing/ieee_preprocess.py (not committed:
+# it is produced with the processed data). Only needed for prescaled=false.
+SCALER_PATH = Path(os.getenv('SCALER_PATH', 'data/ieee_cis/processed/scaler.pkl'))
+MAX_FEATURES = 2000
 THRESHOLD  = float(os.getenv('FRAUD_THRESHOLD', '0.5'))
 REDIS_URL  = os.getenv('REDIS_URL', None)
 
@@ -71,12 +75,15 @@ def _load_models():
     ieee_dir = MODEL_PATH / 'ieee'
     if ieee_dir.exists():
         for name, fname in [('xgboost', 'xgboost_ieee.pkl'),
-                              ('iso_forest', 'isolation_forest_ieee.pkl'),
-                              ('scaler', '../processed/scaler.pkl')]:
+                              ('iso_forest', 'isolation_forest_ieee.pkl')]:
             p = ieee_dir / fname
             if p.exists():
                 models['ieee'][name] = joblib.load(p)
                 log.info(f'Loaded IEEE model: {name}')
+        # (this used to look for models/processed/scaler.pkl, which nothing writes)
+        if SCALER_PATH.exists():
+            models['ieee']['scaler'] = joblib.load(SCALER_PATH)
+            log.info(f'Loaded IEEE scaler from {SCALER_PATH}')
 
         # Load IEEE feature names
         feat_file = ieee_dir / 'xgboost_ieee_features.json'
@@ -85,9 +92,10 @@ def _load_models():
                 models['ieee']['feature_names'] = json.load(f)
             log.info(f'IEEE features loaded: {len(models["ieee"]["feature_names"])}')
 
-        # Load Autoencoder if TF available
-        ae_path = ieee_dir / 'autoencoder_ieee.h5'
-        if ae_path.exists():
+        # Load Autoencoder if TF available (train_ieee.py saves .keras; older runs .h5)
+        ae_path = next((p for p in (ieee_dir / 'autoencoder_ieee.keras',
+                                    ieee_dir / 'autoencoder_ieee.h5') if p.exists()), None)
+        if ae_path is not None:
             try:
                 from tensorflow import keras
                 models['ieee']['autoencoder'] = keras.models.load_model(str(ae_path))
@@ -96,27 +104,32 @@ def _load_models():
                 log.warning(f'Could not load IEEE Autoencoder: {e}')
 
 # ── schemas ───────────────────────────────────────────────────────────────────
+def _all_finite(v: List[float]) -> List[float]:
+    if any(not np.isfinite(x) for x in v):
+        raise ValueError('All features must be finite numbers')
+    return v
+
+
 class CCTransaction(BaseModel):
-    transaction_id: Optional[str] = None
-    features: List[float] = Field(..., min_items=30, max_items=30,
+    transaction_id: Optional[str] = Field(None, max_length=64)
+    features: List[float] = Field(..., min_length=30, max_length=30,
         description='30 features: V1-V28 (PCA) + Amount + Time — pre-scaled')
 
-    @validator('features')
-    def check_finite(cls, v):
-        if any(not np.isfinite(x) for x in v):
-            raise ValueError('All features must be finite numbers')
-        return v
+    _finite = field_validator('features')(_all_finite)
 
 class IEEETransaction(BaseModel):
-    transaction_id: Optional[str] = None
-    features: List[float] = Field(...,
+    transaction_id: Optional[str] = Field(None, max_length=64)
+    features: List[float] = Field(..., min_length=1, max_length=MAX_FEATURES,
         description='IEEE-CIS features — see /features/ieee for full list and order')
+    prescaled: bool = Field(True,
+        description='True: features are already standardised like the training data '
+                    '(data/ieee_cis/processed). False: raw encoded features; the server '
+                    'applies the training StandardScaler (needs SCALER_PATH).')
 
-    @validator('features')
-    def check_finite(cls, v):
-        if any(not np.isfinite(x) for x in v):
-            raise ValueError('All features must be finite numbers')
-        return v
+    _finite = field_validator('features')(_all_finite)
+
+class IEEEBatch(BaseModel):
+    transactions: List[IEEETransaction] = Field(..., min_length=1, max_length=1000)
 
 class PredictionResult(BaseModel):
     transaction_id: str
@@ -129,70 +142,57 @@ class PredictionResult(BaseModel):
     latency_ms: float
 
 # ── scoring functions ─────────────────────────────────────────────────────────
+# Only real model outputs are reported. (Earlier versions filled in missing
+# models with formulas over the raw features and labelled them "xgboost" /
+# "autoencoder", and always blended in a fake autoencoder score.)
+ENSEMBLE_WEIGHTS = {
+    3: {'xgboost': 0.5, 'isolation_forest': 0.25, 'autoencoder': 0.25},
+    2: {'xgboost': 0.65, 'isolation_forest': 0.35},
+    1: {'xgboost': 1.0},
+}
+
+
+class ModelUnavailable(Exception):
+    pass
+
+
+def _ensemble(scores: Dict[str, float]) -> float:
+    weights = ENSEMBLE_WEIGHTS[len(scores)]
+    return float(np.clip(sum(w * scores[k] for k, w in weights.items()), 0, 1))
+
+
+def _score(m: dict, X: np.ndarray, dataset: str) -> Dict[str, float]:
+    if 'xgboost' not in m:
+        raise ModelUnavailable(f'No trained {dataset} model is loaded on this server.')
+    scores = {'xgboost': float(m['xgboost'].predict_proba(X)[0, 1])}
+    if 'iso_forest' in m:
+        raw = -m['iso_forest'].score_samples(X)[0]
+        scores['isolation_forest'] = float(np.clip((raw + 0.5), 0, 1))
+        if 'autoencoder' in m:
+            X_rec = m['autoencoder'].predict(X, verbose=0)
+            mse = float(np.mean(np.power(X - X_rec, 2)))
+            scores['autoencoder'] = float(np.clip(mse * 20, 0, 1))
+    scores['ensemble'] = _ensemble(scores)
+    return scores
+
+
 def _score_cc(features: List[float]) -> Dict[str, float]:
+    return _score(models['cc'], np.array(features).reshape(1, -1), 'credit-card')
+
+
+def _score_ieee(features: List[float], prescaled: bool = True) -> Dict[str, float]:
     X = np.array(features).reshape(1, -1)
-    scores = {}
-    m = models['cc']
+    if not prescaled:
+        scaler = models['ieee'].get('scaler')
+        if scaler is None:
+            raise ValueError('prescaled=false needs the training scaler (SCALER_PATH), '
+                             'which is not loaded; send standardised features instead.')
+        X = scaler.transform(X)
+    return _score(models['ieee'], X, 'IEEE-CIS')
 
-    if 'xgboost' in m:
-        scores['xgboost'] = float(m['xgboost'].predict_proba(X)[0, 1])
-    else:
-        scores['xgboost'] = float(np.clip(abs(features[13]) / 20, 0, 1))
 
-    if 'iso_forest' in m:
-        raw = -m['iso_forest'].score_samples(X)[0]
-        scores['isolation_forest'] = float(np.clip((raw + 0.5), 0, 1))
-    else:
-        scores['isolation_forest'] = float(np.clip(abs(features[0]) / 15, 0, 1))
-
-    scores['autoencoder'] = float(np.clip(
-        (abs(features[13]) + abs(features[10])) / 30, 0, 1
-    ))
-    scores['ensemble'] = float(np.clip(
-        0.5 * scores['xgboost'] +
-        0.25 * scores['isolation_forest'] +
-        0.25 * scores['autoencoder'], 0, 1
-    ))
-    return scores
-
-def _score_ieee(features: List[float]) -> Dict[str, float]:
-    from sklearn.preprocessing import MinMaxScaler
-    X = np.array(features).reshape(1, -1)
-    scores = {}
-    m = models['ieee']
-
-    if 'xgboost' in m:
-        scores['xgboost'] = float(m['xgboost'].predict_proba(X)[0, 1])
-    else:
-        scores['xgboost'] = float(np.clip(abs(np.mean(features[:10])) / 5, 0, 1))
-
-    if 'iso_forest' in m:
-        raw = -m['iso_forest'].score_samples(X)[0]
-        scores['isolation_forest'] = float(np.clip((raw + 0.5), 0, 1))
-    else:
-        scores['isolation_forest'] = float(np.clip(abs(features[1]) / 10, 0, 1))
-
-    if 'autoencoder' in m:
-        import tensorflow as tf
-        X_rec = m['autoencoder'].predict(X, verbose=0)
-        mse = float(np.mean(np.power(X - X_rec, 2)))
-        scores['autoencoder'] = float(np.clip(mse * 20, 0, 1))
-    else:
-        scores['autoencoder'] = scores['xgboost'] * 0.9
-
-    n_models = 3 if 'autoencoder' in scores else 2
-    if n_models == 3:
-        scores['ensemble'] = float(np.clip(
-            0.5 * scores['xgboost'] +
-            0.25 * scores['isolation_forest'] +
-            0.25 * scores['autoencoder'], 0, 1
-        ))
-    else:
-        scores['ensemble'] = float(np.clip(
-            0.65 * scores['xgboost'] +
-            0.35 * scores['isolation_forest'], 0, 1
-        ))
-    return scores
+def _txn_id(features: List[float]) -> str:
+    return hashlib.md5(str(features).encode(), usedforsecurity=False).hexdigest()[:12]
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
 @app.get('/health')
@@ -206,7 +206,8 @@ async def health():
             },
             'ieee_cis': {
                 'models_loaded': [k for k in models['ieee'].keys()
-                                  if k != 'feature_names'],
+                                  if k not in ('feature_names', 'scaler')],
+                'scaler_loaded': 'scaler' in models['ieee'],
                 'n_features': len(models['ieee'].get('feature_names', [])),
             }
         },
@@ -223,7 +224,8 @@ async def get_ieee_features():
     return {
         'n_features': len(features),
         'features': features,
-        'note': 'Features must be passed in this exact order to /predict/ieee'
+        'note': ('Features must be passed in this exact order to /predict/ieee, '
+                 'standardised like the training data unless prescaled=false.'),
     }
 
 @app.post('/predict/cc', response_model=PredictionResult)
@@ -231,12 +233,13 @@ async def predict_cc(txn: CCTransaction):
     """Score using Credit Card Fraud dataset models (30 features)."""
     t0 = time.perf_counter()
     counters['requests'] += 1
-    txn_id = txn.transaction_id or hashlib.md5(
-        str(txn.features).encode()).hexdigest()[:12]
+    txn_id = txn.transaction_id or _txn_id(txn.features)
 
     try:
         scores = _score_cc(txn.features)
-    except Exception as e:
+    except ModelUnavailable as e:
+        raise HTTPException(503, str(e))
+    except Exception:
         counters['errors'] += 1
         log.exception('Scoring failed')  # details stay in the server log
         raise HTTPException(500, 'Scoring failed')
@@ -259,8 +262,7 @@ async def predict_ieee(txn: IEEETransaction):
     """Score using IEEE-CIS models (434+ features)."""
     t0 = time.perf_counter()
     counters['requests'] += 1
-    txn_id = txn.transaction_id or hashlib.md5(
-        str(txn.features).encode()).hexdigest()[:12]
+    txn_id = txn.transaction_id or _txn_id(txn.features)
 
     expected = len(models['ieee'].get('feature_names', txn.features))
     if len(txn.features) != expected and expected > 0:
@@ -269,8 +271,12 @@ async def predict_ieee(txn: IEEETransaction):
             f'See GET /features/ieee for the full feature list.')
 
     try:
-        scores = _score_ieee(txn.features)
-    except Exception as e:
+        scores = _score_ieee(txn.features, prescaled=txn.prescaled)
+    except ModelUnavailable as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception:
         counters['errors'] += 1
         log.exception('Scoring failed')  # details stay in the server log
         raise HTTPException(500, 'Scoring failed')
@@ -299,6 +305,12 @@ async def predict_auto(txn: IEEETransaction):
         )
         return await predict_cc(cc_txn)
     return await predict_ieee(txn)
+
+@app.post('/predict/batch', response_model=List[PredictionResult])
+async def predict_batch(batch: IEEEBatch):
+    """Score up to 1000 IEEE-CIS transactions in one request (documented in the
+    README but previously missing)."""
+    return [await predict_ieee(t) for t in batch.transactions]
 
 @app.get('/metrics')
 async def metrics():
