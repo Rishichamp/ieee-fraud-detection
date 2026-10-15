@@ -71,3 +71,10 @@ def test_batch_endpoint():
         assert r.status_code == 200, r.text
         assert [x["transaction_id"] for x in r.json()] == ["a", "b"]
         assert client.post("/predict/batch", json={"transactions": []}).status_code == 422
+
+
+def test_nan_feature_is_a_clean_422():
+    with TestClient(app) as client:
+        r = client.post("/predict/ieee", content='{"features": [NaN, 1.0]}',
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 422

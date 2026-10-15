@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -57,6 +59,14 @@ app = FastAPI(
     description='Supports IEEE-CIS (434 features) and Credit Card (30 features) datasets',
     lifespan=lifespan
 )
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    # The default handler echoes the rejected input; a NaN/Infinity feature
+    # can't be serialised to JSON, so rejecting it crashed into a 500.
+    errors = [{'loc': e.get('loc'), 'msg': e.get('msg'), 'type': e.get('type')}
+              for e in exc.errors()]
+    return JSONResponse(status_code=422, content={'detail': errors})
+
 app.add_middleware(CORSMiddleware, allow_origins=['*'],
                    allow_methods=['GET', 'POST'], allow_headers=['*'])
 
