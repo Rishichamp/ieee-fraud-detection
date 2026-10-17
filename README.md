@@ -104,12 +104,14 @@ ieee_fraud_detection/
 ## 🚀 Quick Start
 
 ### 1. Clone the repository
+
 ```bash
 git clone https://github.com/YOUR_USERNAME/ieee-fraud-detection.git
 cd ieee-fraud-detection
 ```
 
 ### 2. Get the IEEE-CIS dataset
+
 ```bash
 # Install Kaggle CLI
 pip install kaggle
@@ -122,18 +124,21 @@ cd data/ieee_cis && unzip ieee-fraud-detection.zip && cd ../..
 ```
 
 ### 3. Set up environment
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
 ### 4. Preprocess + Train
+
 ```bash
 python preprocessing/ieee_preprocess.py   # ~5-10 min
 python scripts/train_ieee.py              # ~15-20 min
 ```
 
 ### 5. Run locally
+
 ```bash
 # Terminal 1 — API
 uvicorn api.main:app --reload --port 8000
@@ -143,6 +148,7 @@ streamlit run dashboard/app.py --server.port 8501
 ```
 
 ### 6. Or run with Docker
+
 ```bash
 make ssl
 make build
@@ -154,11 +160,13 @@ make up
 ## 🔌 API Reference
 
 ### Health check
+
 ```bash
 curl http://localhost:8000/health
 ```
 
 ### Score a transaction (IEEE-CIS model)
+
 ```bash
 curl -X POST http://localhost:8000/predict/ieee \
   -H "Content-Type: application/json" \
@@ -177,11 +185,13 @@ artifacts are XGBoost + Isolation Forest; the autoencoder joins when
 with no trained model returns `503` rather than a guessed score.
 
 ### Get feature list
+
 ```bash
 curl http://localhost:8000/features/ieee
 ```
 
 ### Batch scoring
+
 ```bash
 curl -X POST http://localhost:8000/predict/batch \
   -H "Content-Type: application/json" \
@@ -190,6 +200,7 @@ curl -X POST http://localhost:8000/predict/batch \
 Up to 1000 transactions per request; returns a list of results.
 
 ### Response format
+
 ```json
 {
   "transaction_id": "TXN-001",
@@ -212,22 +223,26 @@ Up to 1000 transactions per request; returns a list of results.
 ## 🧠 Models
 
 ### XGBoost (AUC: 0.9589)
+
 - 500 trees, max_depth=7, learning_rate=0.05
 - SMOTE oversampling (fraud: 3.5% → 9.1%)
 - scale_pos_weight=27 for class imbalance
 - Early stopping on validation AUC
 
 ### Isolation Forest (AUC: 0.7689)
+
 - 300 estimators, contamination=0.035
 - Trained on legitimate transactions only
 - Catches novel fraud patterns unseen in training
 
 ### Autoencoder
+
 - Architecture: 448→256→128→64→16→64→128→256→448
 - Trained on legitimate transactions only
 - Reconstruction MSE used as anomaly score
 
 ### Graph Detection
+
 - NetworkX DiGraph: card1 nodes → addr1 nodes
 - 13,886 nodes, 39,974 edges
 - Degree centrality and fraud ring detection
